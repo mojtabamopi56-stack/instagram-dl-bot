@@ -1,8 +1,9 @@
 const TelegramBot = require("node-telegram-bot-api");
-const { execFile, exec } = require("child_process");
+const { execFile } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const http = require("http");
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TOKEN) {
@@ -10,9 +11,24 @@ if (!TOKEN) {
   process.exit(1);
 }
 
-const bot = new TelegramBot(TOKEN, { polling: true });
+const PORT = process.env.PORT || 3000;
 
-const INSTAGRAM_REGEX = /https?:\/\/(www\.)?instagram\.com\/(p|reel|tv|stories)\/[^\s]+/i;
+const server = http.createServer((req, res) => {
+  if (req.url === "/health" || req.url === "/") {
+    res.writeHead(200);
+    res.end("OK - Bot is running");
+  } else {
+    res.writeHead(404);
+    res.end("Not found");
+  }
+});
+
+server.listen(PORT, () => {
+  console.log(`Health server running on port ${PORT}`);
+});
+
+const INSTAGRAM_REGEX =
+  /https?:\/\/(www\.)?instagram\.com\/(p|reel|tv|stories)\/[^\s]+/i;
 
 function isInstagramUrl(url) {
   return INSTAGRAM_REGEX.test(url);
@@ -28,25 +44,22 @@ function downloadFile(url, outputPath, extraArgs = []) {
     const args = [
       "--no-playlist",
       "--no-warnings",
-      "-o", outputPath,
+      "-o",
+      outputPath,
       ...extraArgs,
       url,
     ];
-    execFile("yt-dlp", args, { timeout: 120000 }, (err, stdout, stderr) => {
+    execFile("yt-dlp", args, { timeout: 120000 }, (err, _stdout, stderr) => {
       if (err) {
         reject(new Error(stderr || err.message));
       } else {
-        resolve(stdout);
+        resolve();
       }
     });
   });
 }
 
-function getFilePath(dir, pattern) {
-  const files = fs.readdirSync(dir);
-  const found = files.find((f) => f.startsWith(pattern));
-  return found ? path.join(dir, found) : null;
-}
+const bot = new TelegramBot(TOKEN, { polling: true });
 
 bot.onText(/\/start/, (msg) => {
   bot.sendMessage(
@@ -83,13 +96,16 @@ bot.on("message", async (msg) => {
 });
 
 bot.on("callback_query", async (query) => {
-  const chatId = query.message.chat.id;
-  const messageId = query.message.message_id;
-  const data = query.data;
+  const chatId = query.message?.chat.id;
+  const messageId = query.message?.message_id;
+  if (!chatId || !messageId) return;
 
+  const data = query.data;
   if (!data || !data.includes("|")) return;
 
-  const [type, url] = data.split("|");
+  const pipeIdx = data.indexOf("|");
+  const type = data.slice(0, pipeIdx);
+  const url = data.slice(pipeIdx + 1);
 
   await bot.answerCallbackQuery(query.id);
   await bot.editMessageText("⏳ داره دانلود میشه... صبر کن", {
@@ -103,8 +119,10 @@ bot.on("callback_query", async (query) => {
     if (type === "video") {
       const outputTemplate = path.join(tmpDir, "video.%(ext)s");
       await downloadFile(url, outputTemplate, [
-        "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        "--merge-output-format", "mp4",
+        "-f",
+        "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "--merge-output-format",
+        "mp4",
       ]);
 
       const files = fs.readdirSync(tmpDir);
@@ -116,51 +134,56 @@ bot.on("callback_query", async (query) => {
 
       if (stat.size > 50 * 1024 * 1024) {
         await bot.editMessageText(
-          "⚠️ حجم ویدیو بیشتر از ۵۰MB هست و تلگرام اجازه ارسال نمیده.\nبا کیفیت پایین‌تر امتحان میکنم...",
+          "⚠️ حجم ویدیو بیشتر از ۵۰MB هست. با کیفیت پایین‌تر امتحان میکنم...",
           { chat_id: chatId, message_id: messageId }
         );
-
         const output2 = path.join(tmpDir, "video_low.%(ext)s");
         await downloadFile(url, output2, [
-          "-f", "worst[ext=mp4]/worst",
-          "--merge-output-format", "mp4",
+          "-f",
+          "worst[ext=mp4]/worst",
+          "--merge-output-format",
+          "mp4",
         ]);
         const files2 = fs.readdirSync(tmpDir);
         const low = files2.find((f) => f.startsWith("video_low."));
         if (!low) throw new Error("فایل ویدیو پیدا نشد");
-        const lowPath = path.join(tmpDir, low);
-        await bot.sendVideo(chatId, lowPath, { caption: "🎬 ویدیو (کیفیت پایین)" });
+        await bot.sendVideo(chatId, path.join(tmpDir, low), {
+          caption: "🎬 ویدیو (کیفیت پایین)",
+        });
       } else {
-        await bot.sendVideo(chatId, filePath, { caption: "🎬 ویدیو دانلود شد!" });
+        await bot.sendVideo(chatId, filePath, {
+          caption: "🎬 ویدیو دانلود شد!",
+        });
       }
-
       await bot.deleteMessage(chatId, messageId);
     } else if (type === "audio") {
       const outputTemplate = path.join(tmpDir, "audio.%(ext)s");
       await downloadFile(url, outputTemplate, [
         "-x",
-        "--audio-format", "mp3",
-        "--audio-quality", "0",
+        "--audio-format",
+        "mp3",
+        "--audio-quality",
+        "0",
       ]);
 
       const files = fs.readdirSync(tmpDir);
       const audioFile = files.find((f) => f.startsWith("audio."));
       if (!audioFile) throw new Error("فایل صدا پیدا نشد");
 
-      const filePath = path.join(tmpDir, audioFile);
-      await bot.sendAudio(chatId, filePath, { caption: "🎵 صدا دانلود شد!" });
+      await bot.sendAudio(chatId, path.join(tmpDir, audioFile), {
+        caption: "🎵 صدا دانلود شد!",
+      });
       await bot.deleteMessage(chatId, messageId);
     }
   } catch (err) {
-    console.error(err);
-    const errMsg = err.message.includes("Login required") || err.message.includes("login")
-      ? "❌ اینستاگرام برای این ویدیو نیاز به لاگین داره. لینک‌های عمومی (ریل‌های عمومی) کار می‌کنن."
-      : `❌ خطا در دانلود:\n${err.message.slice(0, 200)}`;
+    const errMsg =
+      err.message.includes("Login required") || err.message.includes("login")
+        ? "❌ اینستاگرام برای این ویدیو نیاز به لاگین داره. فقط ریل‌ها و پست‌های عمومی کار می‌کنن."
+        : `❌ خطا در دانلود:\n${err.message.slice(0, 200)}`;
 
-    await bot.editMessageText(errMsg, {
-      chat_id: chatId,
-      message_id: messageId,
-    }).catch(() => bot.sendMessage(chatId, errMsg));
+    await bot
+      .editMessageText(errMsg, { chat_id: chatId, message_id: messageId })
+      .catch(() => bot.sendMessage(chatId, errMsg));
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
