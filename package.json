@@ -1,0 +1,15 @@
+{
+  "name": "instagram-dl-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot to download Instagram videos and audio",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "node-telegram-bot-api": "^0.67.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
