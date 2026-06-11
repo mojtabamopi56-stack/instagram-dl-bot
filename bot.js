@@ -11,39 +11,53 @@ if (!TOKEN) { console.error("TELEGRAM_BOT_TOKEN required"); process.exit(1); }
 const PORT = process.env.PORT || 3000;
 const BOT_USERNAME = "@lnterinstagram_Bot";
 const ADMIN_USERNAME = "Mojeao";
-const WEBHOOK_DOMAIN = process.env.RAILWAY_PUBLIC_DOMAIN
-  ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
-  : null;
-const DATA_FILE = path.join("/tmp", "bot_data.json");
+const DATA_FILE = "/tmp/bot_data.json";
 
-// ─── data ────────────────────────────────────────────────────────────────────
+// ── data ──────────────────────────────────────────────────────────────────────
 function loadData() {
   try { return JSON.parse(fs.readFileSync(DATA_FILE, "utf8")); }
   catch { return { users: {}, forceJoinChannel: null }; }
 }
-function saveData(d) { try { fs.writeFileSync(DATA_FILE, JSON.stringify(d)); } catch {} }
+function saveData(d) {
+  try { fs.writeFileSync(DATA_FILE, JSON.stringify(d)); } catch {}
+}
 let data = loadData();
 
 function addUser(from) {
   if (!from) return;
-  data.users[from.id] = { id: from.id, first_name: from.first_name || "", username: from.username || "", last: Date.now() };
+  data.users[String(from.id)] = {
+    id: from.id,
+    first_name: from.first_name || "",
+    username: from.username || "",
+    last: Date.now(),
+  };
   saveData(data);
 }
 
-// ─── helpers ──────────────────────────────────────────────────────────────────
-const INSTAGRAM_REGEX = /https?:\/\/(www\.)?instagram\.com\/(p|reel|reels|tv|stories)\/[^\s]+/i;
-function extractUrl(text) { const m = text.match(/https?:\/\/[^\s]+/); return m ? m[0] : null; }
-function isInstagram(url) { return INSTAGRAM_REGEX.test(url); }
-function isAdmin(from) { return from && from.username && from.username.toLowerCase() === ADMIN_USERNAME.toLowerCase(); }
+// ── helpers ───────────────────────────────────────────────────────────────────
+const IG_REGEX = /https?:\/\/(www\.)?instagram\.com\/(p|reel|reels|tv|stories)\/[^\s]+/i;
+function extractUrl(text) {
+  const m = text.match(/https?:\/\/[^\s]+/);
+  return m ? m[0] : null;
+}
+function isIG(url) { return IG_REGEX.test(url); }
+function isAdmin(from) {
+  return from && from.username &&
+    from.username.toLowerCase() === ADMIN_USERNAME.toLowerCase();
+}
 
-function downloadFile(url, out, extra = []) {
+function dl(url, out, extra = []) {
   return new Promise((resolve, reject) => {
-    execFile("yt-dlp", ["--no-playlist", "--no-warnings", "-o", out, ...extra, url],
-      { timeout: 120000 }, (err, _o, stderr) => err ? reject(new Error(stderr || err.message)) : resolve());
+    execFile(
+      "yt-dlp",
+      ["--no-playlist", "--no-warnings", "-o", out, ...extra, url],
+      { timeout: 120000 },
+      (err, _o, stderr) => err ? reject(new Error(stderr || err.message)) : resolve()
+    );
   });
 }
 
-async function checkForceJoin(bot, userId) {
+async function checkJoin(bot, userId) {
   if (!data.forceJoinChannel) return true;
   try {
     const m = await bot.getChatMember(data.forceJoinChannel, userId);
@@ -51,80 +65,97 @@ async function checkForceJoin(bot, userId) {
   } catch { return true; }
 }
 
-// ─── bot init (webhook or polling) ────────────────────────────────────────────
-let bot;
-if (WEBHOOK_DOMAIN) {
-  const webhookPath = `/webhook/${TOKEN}`;
-  bot = new TelegramBot(TOKEN, { webHook: { port: PORT } });
-  bot.setWebHook(`${WEBHOOK_DOMAIN}${webhookPath}`);
-  console.log(`Webhook set: ${WEBHOOK_DOMAIN}${webhookPath}`);
-} else {
-  bot = new TelegramBot(TOKEN, { polling: true });
-  console.log("Polling mode");
-}
+// ── health server (separate from bot) ────────────────────────────────────────
+http.createServer((_req, res) => {
+  res.writeHead(200);
+  res.end("bot is running");
+}).listen(PORT, () => console.log("Health server on port", PORT));
 
-// ─── /start ───────────────────────────────────────────────────────────────────
+// ── clear old webhook & start polling ────────────────────────────────────────
+const bot = new TelegramBot(TOKEN, { polling: false });
+
+bot.deleteWebHook().then(() => {
+  bot.startPolling({ restart: false });
+  console.log(`🤖 ${BOT_USERNAME} started polling`);
+}).catch(err => {
+  console.error("deleteWebhook error:", err.message);
+  bot.startPolling({ restart: false });
+});
+
+// ── /start ────────────────────────────────────────────────────────────────────
 bot.onText(/\/start/, async (msg) => {
   addUser(msg.from);
   const name = msg.from?.first_name || "دوست";
-  await bot.sendMessage(msg.chat.id,
-    `سلام ${name}! 👋\n\nمن ربات دانلود اینستاگرام هستم.\n\n🎬 دانلود ویدیو و ریلز\n🎵 دانلود موزیک و صدا\n\nکافیه لینک پست یا ریلز عمومی اینستاگرام رو بفرستی!`
+  bot.sendMessage(msg.chat.id,
+    `سلام ${name}! 👋\n\nربات دانلود اینستاگرام\n\n🎬 ویدیو و ریلز\n🎵 موزیک و صدا\n\nلینک پست یا ریلز عمومی اینستاگرام رو بفرست!`
   );
 });
 
-// ─── /admin ───────────────────────────────────────────────────────────────────
+// ── /admin ────────────────────────────────────────────────────────────────────
 bot.onText(/\/admin/, async (msg) => {
-  if (!isAdmin(msg.from)) return bot.sendMessage(msg.chat.id, "❌ شما ادمین نیستید.");
+  if (!isAdmin(msg.from)) return bot.sendMessage(msg.chat.id, "❌ دسترسی ندارید.");
   const count = Object.keys(data.users).length;
-  await bot.sendMessage(msg.chat.id,
-    `👑 پنل ادمین @${ADMIN_USERNAME}\n\n👤 کاربران: ${count} نفر\n🔒 جوین اجباری: ${data.forceJoinChannel || "ندارد"}`,
-    { reply_markup: { inline_keyboard: [
-      [{ text: "📢 پیام همگانی", callback_data: "a_broadcast" }],
-      [{ text: "🔒 تنظیم جوین اجباری", callback_data: "a_setjoin" }, { text: "❌ حذف جوین", callback_data: "a_removejoin" }],
-      [{ text: "📊 آمار کاربران", callback_data: "a_stats" }],
-    ]}}
+  bot.sendMessage(msg.chat.id,
+    `👑 پنل ادمین — @${ADMIN_USERNAME}\n\n👤 کاربران: ${count} نفر\n🔒 جوین اجباری: ${data.forceJoinChannel || "ندارد"}`,
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "📢 پیام همگانی", callback_data: "adm_broadcast" }],
+          [
+            { text: "🔒 تنظیم جوین اجباری", callback_data: "adm_setjoin" },
+            { text: "❌ حذف جوین", callback_data: "adm_removejoin" },
+          ],
+          [{ text: "📊 آمار", callback_data: "adm_stats" }],
+        ],
+      },
+    }
   );
 });
 
-// ─── /broadcast ───────────────────────────────────────────────────────────────
+// ── /broadcast ───────────────────────────────────────────────────────────────
 bot.onText(/\/broadcast (.+)/s, async (msg, match) => {
   if (!isAdmin(msg.from)) return;
   const text = match[1];
   const users = Object.values(data.users);
+  const sm = await bot.sendMessage(msg.chat.id, `⏳ در حال ارسال به ${users.length} نفر...`);
   let sent = 0, failed = 0;
-  const statusMsg = await bot.sendMessage(msg.chat.id, `⏳ در حال ارسال به ${users.length} نفر...`);
   for (const u of users) {
     try { await bot.sendMessage(u.id, `📢 پیام ادمین:\n\n${text}`); sent++; }
     catch { failed++; }
-    await new Promise(r => setTimeout(r, 50));
+    await new Promise(r => setTimeout(r, 60));
   }
-  await bot.editMessageText(`✅ ارسال تموم شد!\n✔️ موفق: ${sent}\n❌ ناموفق: ${failed}`,
-    { chat_id: msg.chat.id, message_id: statusMsg.message_id });
+  bot.editMessageText(
+    `✅ تموم شد!\n✔️ موفق: ${sent}\n❌ ناموفق: ${failed}`,
+    { chat_id: msg.chat.id, message_id: sm.message_id }
+  );
 });
 
-// ─── /setjoin ─────────────────────────────────────────────────────────────────
+// ── /setjoin ──────────────────────────────────────────────────────────────────
 bot.onText(/\/setjoin (@?\S+)/, async (msg, match) => {
   if (!isAdmin(msg.from)) return;
   const ch = match[1].startsWith("@") ? match[1] : "@" + match[1];
-  data.forceJoinChannel = ch; saveData(data);
-  await bot.sendMessage(msg.chat.id, `✅ جوین اجباری فعال شد: ${ch}`);
+  data.forceJoinChannel = ch;
+  saveData(data);
+  bot.sendMessage(msg.chat.id, `✅ جوین اجباری فعال: ${ch}`);
 });
 
-// ─── /removejoin ─────────────────────────────────────────────────────────────
+// ── /removejoin ───────────────────────────────────────────────────────────────
 bot.onText(/\/removejoin/, async (msg) => {
   if (!isAdmin(msg.from)) return;
-  data.forceJoinChannel = null; saveData(data);
-  await bot.sendMessage(msg.chat.id, "✅ جوین اجباری حذف شد.");
+  data.forceJoinChannel = null;
+  saveData(data);
+  bot.sendMessage(msg.chat.id, "✅ جوین اجباری حذف شد.");
 });
 
-// ─── /stats ──────────────────────────────────────────────────────────────────
+// ── /stats ────────────────────────────────────────────────────────────────────
 bot.onText(/\/stats/, async (msg) => {
   if (!isAdmin(msg.from)) return;
-  await bot.sendMessage(msg.chat.id,
-    `📊 آمار:\n👤 کاربران ثبت‌شده: ${Object.keys(data.users).length}\n🔒 جوین اجباری: ${data.forceJoinChannel || "ندارد"}`);
+  bot.sendMessage(msg.chat.id,
+    `📊 آمار:\n👤 کاربران: ${Object.keys(data.users).length}\n🔒 جوین: ${data.forceJoinChannel || "ندارد"}`
+  );
 });
 
-// ─── messages ─────────────────────────────────────────────────────────────────
+// ── messages ──────────────────────────────────────────────────────────────────
 bot.on("message", async (msg) => {
   const text = msg.text;
   if (!text || text.startsWith("/")) return;
@@ -133,119 +164,128 @@ bot.on("message", async (msg) => {
   const name = msg.from?.first_name || "دوست";
   const userId = msg.from?.id;
 
-  // force join check
   if (data.forceJoinChannel && userId) {
-    const joined = await checkForceJoin(bot, userId);
+    const joined = await checkJoin(bot, userId);
     if (!joined) {
       const ch = data.forceJoinChannel.replace("@", "");
       return bot.sendMessage(msg.chat.id,
         `سلام ${name}! ⚠️\n\nبرای استفاده از ربات باید عضو کانال بشی:`,
-        { reply_markup: { inline_keyboard: [[
-          { text: "🔔 عضویت در کانال", url: `https://t.me/${ch}` },
-          { text: "✅ عضو شدم، بررسی کن", callback_data: `checkjoin_${userId}` }
-        ]]}}
+        {
+          reply_markup: {
+            inline_keyboard: [[
+              { text: "🔔 عضویت در کانال", url: `https://t.me/${ch}` },
+              { text: "✅ عضو شدم", callback_data: `cj_${userId}` },
+            ]],
+          },
+        }
       );
     }
   }
 
   const url = extractUrl(text);
-  if (!url || !isInstagram(url)) {
+  if (!url || !isIG(url)) {
     return bot.sendMessage(msg.chat.id,
-      `سلام ${name}! ❌\n\nلینک اینستاگرام معتبر نیست.\nیه لینک ریلز یا پست عمومی از اینستاگرام بفرست.`
+      `سلام ${name}! ❌\n\nلینک اینستاگرام معتبر نیست.\nلینک ریلز یا پست عمومی بفرست.`
     );
   }
 
-  await bot.sendMessage(msg.chat.id, `${name} عزیز، چی می‌خوای دانلود کنی؟ 👇`, {
-    reply_markup: { inline_keyboard: [[
-      { text: "🎬 دانلود ویدیو / ریلز", callback_data: `video|${url}` },
-      { text: "🎵 دانلود صدا (MP3)", callback_data: `audio|${url}` },
-    ]]}
+  bot.sendMessage(msg.chat.id, `${name} عزیز، چی دانلود کنم؟ 👇`, {
+    reply_markup: {
+      inline_keyboard: [[
+        { text: "🎬 ویدیو / ریلز", callback_data: `video|${url}` },
+        { text: "🎵 صدا (MP3)", callback_data: `audio|${url}` },
+      ]],
+    },
   });
 });
 
-// ─── callbacks ────────────────────────────────────────────────────────────────
+// ── callbacks ─────────────────────────────────────────────────────────────────
 bot.on("callback_query", async (query) => {
   const chatId = query.message?.chat.id;
-  const messageId = query.message?.message_id;
+  const msgId = query.message?.message_id;
   const from = query.from;
-  if (!chatId) return;
-
-  await bot.answerCallbackQuery(query.id);
   const d = query.data || "";
+  if (!chatId) return;
+  await bot.answerCallbackQuery(query.id).catch(() => {});
 
-  // admin callbacks
-  if (d === "a_stats") {
-    return bot.sendMessage(chatId, `📊 کاربران: ${Object.keys(data.users).length}\n🔒 جوین: ${data.forceJoinChannel || "ندارد"}`);
+  // admin panel
+  if (d === "adm_stats") {
+    return bot.sendMessage(chatId,
+      `📊 کاربران: ${Object.keys(data.users).length}\n🔒 جوین: ${data.forceJoinChannel || "ندارد"}`
+    );
   }
-  if (d === "a_removejoin") {
+  if (d === "adm_removejoin") {
     if (!isAdmin(from)) return;
     data.forceJoinChannel = null; saveData(data);
     return bot.sendMessage(chatId, "✅ جوین اجباری حذف شد.");
   }
-  if (d === "a_broadcast") {
-    return bot.sendMessage(chatId, "برای پیام همگانی:\n\n/broadcast متن پیامت اینجا");
+  if (d === "adm_broadcast") {
+    return bot.sendMessage(chatId, "📢 برای پیام همگانی:\n\n/broadcast متن پیامت");
   }
-  if (d === "a_setjoin") {
-    return bot.sendMessage(chatId, "برای تنظیم جوین اجباری:\n\n/setjoin @channel_username");
+  if (d === "adm_setjoin") {
+    return bot.sendMessage(chatId, "🔒 برای جوین اجباری:\n\n/setjoin @channel_username");
   }
 
-  // check join callback
-  if (d.startsWith("checkjoin_")) {
+  // check join
+  if (d.startsWith("cj_")) {
     const uid = parseInt(d.split("_")[1]);
-    const joined = await checkForceJoin(bot, uid);
+    const joined = await checkJoin(bot, uid);
     const name = from.first_name || "دوست";
-    if (joined) return bot.sendMessage(chatId, `✅ ${name} عزیز، عضویتت تأیید شد! حالا لینک اینستاگرامت رو بفرست.`);
-    else return bot.sendMessage(chatId, `❌ هنوز عضو نشدی. اول عضو بشو بعد دوباره بزن.`);
+    return joined
+      ? bot.sendMessage(chatId, `✅ ${name} عزیز، تأیید شد! حالا لینک بفرست.`)
+      : bot.sendMessage(chatId, "❌ هنوز عضو نشدی. عضو بشو بعد بزن.");
   }
 
-  // download callbacks
+  // download
   if (!d.includes("|")) return;
-  const pipeIdx = d.indexOf("|");
-  const type = d.slice(0, pipeIdx);
-  const url = d.slice(pipeIdx + 1);
-  const name = from?.first_name || "دوست";
+  const pipe = d.indexOf("|");
+  const type = d.slice(0, pipe);
+  const url = d.slice(pipe + 1);
 
-  await bot.editMessageText("⏳ داره دانلود میشه... صبر کن", { chat_id: chatId, message_id: messageId });
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "igdl-"));
+  await bot.editMessageText("⏳ دانلود در حال انجام... صبر کن", { chat_id: chatId, message_id: msgId });
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "igdl-"));
 
   try {
     if (type === "video") {
-      await downloadFile(url, path.join(tmpDir, "video.%(ext)s"), [
+      await dl(url, path.join(tmp, "v.%(ext)s"), [
         "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
         "--merge-output-format", "mp4",
       ]);
-      const vf = fs.readdirSync(tmpDir).find(f => f.startsWith("video."));
+      let vf = fs.readdirSync(tmp).find(f => f.startsWith("v."));
       if (!vf) throw new Error("فایل ویدیو پیدا نشد");
-      const fp = path.join(tmpDir, vf);
+      let fp = path.join(tmp, vf);
+
       if (fs.statSync(fp).size > 50 * 1024 * 1024) {
-        await bot.editMessageText("⚠️ حجم بیشتر از ۵۰MB. با کیفیت پایین امتحان میکنم...", { chat_id: chatId, message_id: messageId });
-        await downloadFile(url, path.join(tmpDir, "low.%(ext)s"), ["-f", "worst[ext=mp4]/worst", "--merge-output-format", "mp4"]);
-        const lf = fs.readdirSync(tmpDir).find(f => f.startsWith("low."));
+        await bot.editMessageText("⚠️ حجم بیشتر از ۵۰MB، کیفیت پایین امتحان میکنم...", { chat_id: chatId, message_id: msgId });
+        await dl(url, path.join(tmp, "low.%(ext)s"), ["-f", "worst[ext=mp4]/worst", "--merge-output-format", "mp4"]);
+        const lf = fs.readdirSync(tmp).find(f => f.startsWith("low."));
         if (!lf) throw new Error("فایل پیدا نشد");
-        await bot.sendVideo(chatId, path.join(tmpDir, lf), { caption: `🎬 ویدیو / ریلز دانلود شد\nby ${BOT_USERNAME}` });
-      } else {
-        await bot.sendVideo(chatId, fp, { caption: `🎬 ویدیو / ریلز دانلود شد\nby ${BOT_USERNAME}` });
+        fp = path.join(tmp, lf);
       }
-      await bot.deleteMessage(chatId, messageId);
+      await bot.sendVideo(chatId, fp, { caption: `🎬 ویدیو / ریلز دانلود شد\nby ${BOT_USERNAME}` });
+      await bot.deleteMessage(chatId, msgId).catch(() => {});
 
     } else if (type === "audio") {
-      await downloadFile(url, path.join(tmpDir, "audio.%(ext)s"), ["-x", "--audio-format", "mp3", "--audio-quality", "0"]);
-      const af = fs.readdirSync(tmpDir).find(f => f.startsWith("audio."));
+      await dl(url, path.join(tmp, "a.%(ext)s"), ["-x", "--audio-format", "mp3", "--audio-quality", "0"]);
+      const af = fs.readdirSync(tmp).find(f => f.startsWith("a."));
       if (!af) throw new Error("فایل صدا پیدا نشد");
-      await bot.sendAudio(chatId, path.join(tmpDir, af), { caption: `🎵 صدا دانلود شد\nby ${BOT_USERNAME}` });
-      await bot.deleteMessage(chatId, messageId);
+      await bot.sendAudio(chatId, path.join(tmp, af), { caption: `🎵 صدا دانلود شد\nby ${BOT_USERNAME}` });
+      await bot.deleteMessage(chatId, msgId).catch(() => {});
     }
   } catch (err) {
-    const errMsg = err.message.includes("Login required") || err.message.includes("login")
+    const errMsg = (err.message.includes("Login") || err.message.includes("login"))
       ? "❌ این ویدیو خصوصیه.\nفقط ریلز و پست‌های عمومی کار می‌کنن."
-      : `❌ خطا در دانلود:\n${err.message.slice(0, 300)}`;
-    await bot.editMessageText(errMsg, { chat_id: chatId, message_id: messageId })
+      : `❌ خطا:\n${err.message.slice(0, 300)}`;
+    bot.editMessageText(errMsg, { chat_id: chatId, message_id: msgId })
       .catch(() => bot.sendMessage(chatId, errMsg));
   } finally {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
 
-bot.on("polling_error", (err) => { if (!err.message.includes("409")) console.error("polling:", err.message); });
-
-console.log(`🤖 ربات ${BOT_USERNAME} روشن شد!`);
+bot.on("polling_error", (err) => {
+  if (err.code === "EFATAL") {
+    console.error("Fatal polling error, restarting in 5s:", err.message);
+    setTimeout(() => bot.startPolling({ restart: false }), 5000);
+  }
+});
